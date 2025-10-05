@@ -166,7 +166,6 @@ ROSTER:
 
 Fill in the C1 and C5 personnel rank and name in the parade state message below. Just output the completed message without any extra commentary or explanation.
 
-**PARADE STATE MESSAGE:**
 {parade_state}
 """
     
@@ -245,7 +244,7 @@ async def handle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Send the result
         await processing_msg.edit_text(
-            f"✅ Parade state generated successfully!\n\n{parade_state}"
+            f"{parade_state}"
         )
         
     except ValueError:

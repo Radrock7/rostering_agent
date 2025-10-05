@@ -1,0 +1,1 @@
+worker: python telegram_roster_bot.py

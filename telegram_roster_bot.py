@@ -5,6 +5,7 @@ import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import logging
+import os
 
 # Configure logging
 logging.basicConfig(
@@ -15,8 +16,11 @@ logger = logging.getLogger(__name__)
 
 # Configuration - Load from environment variables
 import os
+from dotenv import load_dotenv
+load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CSV_URL = os.getenv("CSV_URL")
+C1_C5_CSV_URL = os.getenv("C1_C5_CSV_URL")  # New CSV for C1/C5 duty
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 def fetch_csv_from_url(url):
@@ -142,7 +146,50 @@ def process_roster_with_gemini(url, api_key, target_date_col):
     parade_state = generate_parade_state_with_gemini(api_key, roster_df, date, day)
     return parade_state
 
-# Telegram Bot Handlers
+def prepare_c1_c5_data(df, target_date_col):
+    """Extract C1/C5 duty data for previous and current day."""
+    target_data = df.iloc[5:21, [1, target_date_col - 1, target_date_col]].copy().reset_index(drop=True)
+    target_data.columns = ['Name', 'Previous Day Duty', 'Current Day Duty']
+    return target_data
+
+def fill_c1_c5_with_gemini(api_key, parade_state, c1_c5_df):
+    """Use Gemini API to fill in C1 and C5 personnel in parade state."""
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-2.5-flash', generation_config=genai.GenerationConfig(
+            temperature=0,
+        ))
+    
+    prompt = f"""You are an administrative assistant in charge of identifying the C1 and C5 personnel for a military unit based on a duty roster.
+
+Look at the following duty roster (previous day and current day) and identify the C1 and C5 personnel for the current day (second column). If it is not stated explicitly, then the previous day C1 will be the current day C5.
+
+ROSTER:
+{c1_c5_df.to_string(index=False)}
+
+Fill in the C1 and C5 personnel rank and name in the parade state message below. Just output the completed message without any extra commentary or explanation.
+
+**PARADE STATE MESSAGE:**
+{parade_state}
+"""
+    
+    response = model.generate_content(prompt)
+    return response.text
+
+def process_full_parade_state(main_csv_url, c1_c5_csv_url, api_key, target_date_col):
+    """Generate complete parade state with C1 and C5 filled in."""
+    # Step 1: Generate initial parade state
+    initial_parade_state = process_roster_with_gemini(main_csv_url, api_key, target_date_col)
+    
+    # Step 2: Fetch C1/C5 data
+    csv_data = fetch_csv_from_url(c1_c5_csv_url)
+    df = pd.read_csv(csv_data, header=None)
+    c1_c5_df = prepare_c1_c5_data(df, target_date_col)
+    
+    # Step 3: Fill in C1 and C5
+    final_parade_state = fill_c1_c5_with_gemini(api_key, initial_parade_state, c1_c5_df)
+
+    return final_parade_state
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a message when the command /start is issued."""
     welcome_message = (
@@ -190,8 +237,13 @@ async def handle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Calculate column index
         target_column = date + 2
         
-        # Generate parade state
-        parade_state = process_roster_with_gemini(CSV_URL, GEMINI_API_KEY, target_column)
+        # Generate complete parade state (with C1 and C5 filled)
+        parade_state = process_full_parade_state(
+            CSV_URL, 
+            C1_C5_CSV_URL, 
+            GEMINI_API_KEY, 
+            target_column
+        )
         
         # Send the result
         await processing_msg.edit_text(

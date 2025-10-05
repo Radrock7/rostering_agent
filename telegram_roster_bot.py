@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 
 # Configuration - Load from environment variables
 import os
-from dotenv import load_dotenv
-load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CSV_URL = os.getenv("CSV_URL")
 C1_C5_CSV_URL = os.getenv("C1_C5_CSV_URL")  # New CSV for C1/C5 duty

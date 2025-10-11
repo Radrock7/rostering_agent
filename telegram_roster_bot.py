@@ -6,7 +6,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 import logging
 import os
-
+import gspread
+from google.oauth2.service_account import Credentials
+from typing import Optional, Tuple, Dict, List
+import json
+from dotenv import load_dotenv
+load_dotenv()
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -19,11 +24,137 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SHEETS_API_KEY = os.getenv("GOOGLE_SHEETS_API_KEY")
 MAIN_SPREADSHEET_ID = os.getenv("MAIN_SPREADSHEET_ID")
 C1_C5_SPREADSHEET_ID = os.getenv("C1_C5_SPREADSHEET_ID")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MEDICS_REFERENCE_LIST = os.getenv("MEDICS_REFERENCE_LIST")  # Reference list of medics with full names and ranks
+CURRENT_MONTH = os.getenv("CURRENT_MONTH", "OCTOBER")  # Default to OCTOBER
 
 # Conversation states
 SELECTING_DATE, SELECTING_MAIN_SHEET, SELECTING_C1C5_SHEET = range(3)
+
+class LeaveTracker:
+    """Track leave status from Google Sheets"""
+    
+    def __init__(self, spreadsheet_id: str, sheet_id: int, credentials_json: str = None):
+        """Initialize Leave Tracker with service account credentials and specific sheet ID
+        
+        Args:
+            spreadsheet_id: The Google Spreadsheet ID
+            sheet_id: The specific sheet ID (gid) to open
+            credentials_json: Service account credentials as JSON string
+        """
+        scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+        
+        if credentials_json:
+            # Load from JSON string (environment variable)
+            creds_json = json.loads(credentials_json)
+            creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
+        else:
+            raise ValueError("No credentials provided. Set GOOGLE_CREDENTIALS_JSON env var")
+        
+        self.client = gspread.authorize(creds)
+        spreadsheet = self.client.open_by_key(spreadsheet_id)
+        
+        # Open the specific sheet by ID
+        try:
+            self.sheet = spreadsheet.get_worksheet_by_id(sheet_id)
+            logger.info(f"Opened sheet with ID: {sheet_id}, Title: {self.sheet.title}")
+        except gspread.WorksheetNotFound:
+            logger.error(f"Sheet with ID {sheet_id} not found. Using first sheet as fallback.")
+            self.sheet = spreadsheet.get_worksheet(0)
+        
+        # Column and row configuration
+        self.NAME_COLUMN = 2  # Column B
+        self.DAY_1_COLUMN = 4  # Column D
+        self.START_ROW = 6     # First person's row
+        self.END_ROW = 17      # Last person's row
+        
+        # Leave types to detect
+        self.LEAVE_TYPES = ['MC', 'LL', 'OSL', 'COMPASSIONATE LEAVE', 'COURSE']
+        
+        # Cache merged ranges for the specific sheet
+        metadata = self.sheet.spreadsheet.fetch_sheet_metadata()
+        # Find the merges for this specific sheet
+        for sheet_metadata in metadata['sheets']:
+            if sheet_metadata['properties']['sheetId'] == sheet_id:
+                self.merged_ranges = sheet_metadata.get('merges', [])
+                logger.info(f"Found {len(self.merged_ranges)} merged ranges in sheet")
+                break
+        else:
+            self.merged_ranges = []
+            logger.warning(f"No merged ranges found for sheet ID {sheet_id}")
+    
+    def _is_leave_cell(self, cell_value: str) -> bool:
+        """Check if cell contains any leave type"""
+        if not cell_value:
+            return False
+        cell_upper = cell_value.upper()
+        return any(leave_type in cell_upper for leave_type in self.LEAVE_TYPES)
+    
+    def _find_person_row(self, name: str) -> Optional[int]:
+        """Find the row number for a person by name"""
+        for row in range(self.START_ROW, self.END_ROW + 1):
+            cell_value = self.sheet.cell(row, self.NAME_COLUMN).value
+            if cell_value and cell_value.strip() == name.strip():
+                return row
+        return None
+    
+    def check_leave_on_day(self, row_idx: int, day: int) -> Optional[Tuple[str, int, int]]:
+        """
+        Check if person is on leave for a specific day
+        
+        Args:
+            row_idx: Row number of the person
+            day: Day number (1-31)
+            
+        Returns:
+            Tuple of (cell_value, start_day, end_day) if on leave, None otherwise
+        """
+        # Check all merged ranges for this row
+        for merge in self.merged_ranges:
+            start_row = merge['startRowIndex'] + 1
+            end_row = merge['endRowIndex']
+            start_col = merge['startColumnIndex'] + 1
+            end_col = merge['endColumnIndex']
+            
+            # Check if this merge affects the person's row
+            if start_row <= row_idx <= end_row:
+                # Calculate day range
+                start_day = start_col - (self.DAY_1_COLUMN - 1)
+                end_day = end_col - (self.DAY_1_COLUMN - 1)
+                
+                # Check if the queried day falls within this range
+                if start_day <= day <= end_day:
+                    cell_value = self.sheet.cell(row_idx, start_col).value or ""
+                    
+                    if self._is_leave_cell(cell_value):
+                        return (cell_value.strip(), start_day, end_day)
+        
+        return None
+    
+    def check_people_on_day(self, names: List[str], day: int) -> Dict[str, Optional[Tuple[str, int, int]]]:
+        """
+        Check leave status for specific people on a day
+        
+        Args:
+            names: List of names to check
+            day: Day number (1-31)
+            
+        Returns:
+            Dictionary mapping names to their leave info (leave_type, start_day, end_day)
+        """
+        results = {}
+        for name in names:
+            row_idx = self._find_person_row(name)
+            logger.info(f"Checking leave for '{name}' at row {row_idx}")
+            if row_idx:
+                results[name] = self.check_leave_on_day(row_idx, day)
+                if results[name]:
+                    logger.info(f"Leave detected for '{name}': {results[name]}")
+            else:
+                logger.warning(f"'{name}' not found in leave spreadsheet")
+        
+        return results
 
 def get_sheet_names(spreadsheet_id, api_key):
     """Fetch all sheet names and IDs from a Google Spreadsheet."""
@@ -62,10 +193,64 @@ def prepare_roster_data(df, target_date_col):
     """Extract relevant roster data for the target date."""
     roster_df = df.iloc[5:18, [1, target_date_col]].copy()
     roster_df.columns = ['Name', 'Duty']
-    month = df.iloc[1, 1]
-    return roster_df, month
+    return roster_df
 
-def generate_parade_state_with_gemini(api_key, roster_df, date, day, month):
+def update_roster_with_leave_info(roster_df, date, month, spreadsheet_id, sheet_id, credentials_json):
+    """
+    Update roster with leave information for personnel with NaN duty
+    
+    Args:
+        roster_df: DataFrame with Name and Duty columns
+        date: Day number (1-31)
+        month: Month name (e.g., "OCTOBER")
+        spreadsheet_id: Google Sheets spreadsheet ID
+        sheet_id: Specific sheet ID (gid) to check for leave
+        credentials_json: Service account credentials JSON string
+        
+    Returns:
+        Updated DataFrame with leave information
+    """
+    try:
+        # Find people with NaN duty (no specific assignment)
+        names_to_check = roster_df[roster_df['Duty'].isna()]['Name'].tolist()
+        
+        if not names_to_check:
+            logger.info("No personnel with NaN duty to check for leave")
+            return roster_df
+        
+        # Remove last entry if it exists (often a summary row)
+        if names_to_check:
+            names_to_check = names_to_check[:-1] if len(names_to_check) > 1 else names_to_check
+        
+        logger.info(f"Checking leave for {len(names_to_check)} personnel: {names_to_check}")
+        
+        # Initialize leave tracker with specific sheet ID
+        tracker = LeaveTracker(spreadsheet_id, sheet_id, credentials_json)
+        
+        # Check leave status
+        results = tracker.check_people_on_day(names_to_check, date)
+        
+        # Update roster with leave information
+        on_leave = {name: result for name, result in results.items() if result is not None}
+        
+        if on_leave:
+            logger.info(f"Found {len(on_leave)} personnel on leave")
+            for name, result in on_leave.items():
+                leave_reason, start_day, end_day = result
+                leave_info = f"{leave_reason} ({start_day} {month} - {end_day} {month})"
+                roster_df.loc[roster_df['Name'] == name, 'Duty'] = leave_info
+                logger.info(f"Updated {name}: {leave_info}")
+        else:
+            logger.info("No personnel on leave")
+        
+        return roster_df
+        
+    except Exception as e:
+        logger.error(f"Error checking leave status: {e}")
+        logger.warning("Continuing without leave information")
+        return roster_df
+
+def generate_parade_state_with_gemini(api_key, roster_df, date, day):
     """Use Gemini API to generate parade state message."""
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.5-flash', generation_config=genai.GenerationConfig(
@@ -75,8 +260,8 @@ def generate_parade_state_with_gemini(api_key, roster_df, date, day, month):
     prompt = f"""You are a military administrative assistant helping to generate a daily parade state message for a medical unit.
 
 **INPUT DATA:**
-Date: {date} {month} 2025
-Day: {day} (Spell out full word in caps)
+Date: {date} OCTOBER 2025
+Day: {day}
 
 Roster (Name and Duty Assignment):
 {roster_df.to_string(index=False)}
@@ -90,27 +275,31 @@ Roster (Name and Duty Assignment):
 - OFF: Official Off
 - COURSE: Attending Course
 - MC: Medical Certificate (Sick)
+- LL: Leave of any kind
+- COMPASSIONATE LEAVE: Compassionate leave
 - NaN: No specific duty (Additional personnel)
 - CPC: External staff (not counted in attendance)
+- Leave entries with duration format: LEAVE_TYPE (START_DATE - END_DATE) should be listed with the duration included
 
 **SPECIAL RULES:**
 1. CPC is external staff and should NOT be counted in holding strength, present strength, or medic strength
 2. If CPC has a duty (e.g., M2), another person will be assigned as M-2. In the parade state, list them as "M2: <M-2 Rank and Name>/ CPC". Do not count CPC in strength calculations.
 3. Anyone with NaN (no duty) should be listed under "Additional"
-4. Anyone with MA, DO, OIL, OFF, COURSE, MC, OSL should be listed under "Medics:" section with their absence reason
-5. Sort all names by military rank (highest to lowest): CPT > LTA > ME3 > ME2 > ME1 > 2SG > 3SG > CFC > CPL > LCP > PTE
-6. Total holding strength is 17 (12 medics + 1 supply assistant + 2 MO + 2 SM)
-7. Total medics = 12 (fixed)
-8. There can be two medics doing the same duty but at different times (AM/PM), put their names together separated by "/" under the M1, M2, M3, M4 sections (e.g. M1: SGT TAN / CPL LEE). Put the AM duty name first, then PM duty.
+4. Anyone with MA, DO, OIL, OFF, COURSE, MC, OSL, LL, COMPASSIONATE LEAVE should be listed under "Medics:" section with their absence reason
+5. If leave information includes duration (e.g., "MC (5 OCTOBER - 8 OCTOBER)"), include the full duration in the output
+6. Sort all names by military rank (highest to lowest): CPT > LTA > ME3 > ME2 > ME1 > 2SG > 3SG > CFC > CPL > LCP > PTE
+7. Total holding strength is 17 (12 medics + 1 supply assistant + 2 MO + 2 SM)
+8. Total medics = 12 (fixed)
+9. There can be two medics doing the same duty but at different times (AM/PM), put their names together separated by "/" under the M1, M2, M3, M4 sections (e.g. M1: SGT TAN / CPL LEE). Put the AM duty name first, then PM duty.
 
 **CALCULATIONS:**
-- Present Strength: Holding strength minus those who are absent (MA, DO, OIL, OFF, COURSE, MC, OSL)
+- Present Strength: Holding strength minus those who are absent (MA, DO, OIL, OFF, COURSE, MC, OSL, LL, COMPASSIONATE LEAVE)
 - Medic Strength: Total medics minus absent medics
 
 **OUTPUT FORMAT:**
 Generate EXACTLY this format:
 
-PARADE STATE FOR {date} {month} 2025 {day}
+PARADE STATE FOR {date} OCTOBER 2025 {day}
 
 Holding Strength: 17
 Present Strength: [calculate]/[holding strength]
@@ -185,7 +374,6 @@ ROSTER:
 
 Fill in the C1 and C5 personnel rank and name in the parade state message below. Just output the completed message without any extra commentary or explanation.
 
-**PARADE STATE MESSAGE:**
 {parade_state}
 """
     
@@ -223,22 +411,27 @@ Output the corrected parade state message with accurate medic names and ranks. D
     response = model.generate_content(prompt)
     return response.text
 
-def process_full_parade_state(main_csv_url, c1_c5_csv_url, api_key, reference_list, target_date_col):
-    """Generate complete parade state with C1, C5, and corrected medic names/ranks."""
-    # Step 1: Generate initial parade state
+def process_full_parade_state(main_csv_url, c1_c5_csv_url, api_key, reference_list, target_date_col, date, month, spreadsheet_id, sheet_id, credentials_json):
+    """Generate complete parade state with leave info, C1, C5, and corrected medic names/ranks."""
+    # Step 1: Fetch main roster and prepare initial data
     csv_data = fetch_csv_from_url(main_csv_url)
     df = pd.read_csv(csv_data, header=None)
-    date, day = extract_date_info(df, target_date_col)
-    roster_df, month = prepare_roster_data(df, target_date_col)
-    initial_parade_state = generate_parade_state_with_gemini(api_key, roster_df, date, day, month)
+    date_num, day = extract_date_info(df, target_date_col)
+    roster_df = prepare_roster_data(df, target_date_col)
     
-    # Step 2: Fetch C1/C5 data and fill in C1 and C5
+    # Step 2: Update roster with leave information (using same spreadsheet and selected sheet)
+    roster_df = update_roster_with_leave_info(roster_df, date, month, spreadsheet_id, sheet_id, credentials_json)
+    
+    # Step 3: Generate initial parade state with updated roster
+    initial_parade_state = generate_parade_state_with_gemini(api_key, roster_df, date_num, day)
+    
+    # Step 4: Fetch C1/C5 data and fill in C1 and C5
     csv_data = fetch_csv_from_url(c1_c5_csv_url)
     df = pd.read_csv(csv_data, header=None)
     c1_c5_df = prepare_c1_c5_data(df, target_date_col)
     parade_state_with_c1_c5 = fill_c1_c5_with_gemini(api_key, initial_parade_state, c1_c5_df)
     
-    # Step 3: Correct medic names and ranks using reference list
+    # Step 5: Correct medic names and ranks using reference list
     final_parade_state = correct_medic_names_ranks(api_key, parade_state_with_c1_c5, reference_list)
     
     return final_parade_state
@@ -374,32 +567,40 @@ async def handle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Send processing message
         processing_msg = await update.message.reply_text(
-            f"⏳ Generating parade state for October {date}...\n"
+            f"⏳ Generating parade state for {CURRENT_MONTH} {date}...\n"
+            "Checking leave status and processing roster...\n"
             "Please wait a moment."
         )
         
-        # Build CSV URLs
+        # Get selected sheet IDs
         main_sheet_id = context.user_data.get('main_sheet_id')
         c1c5_sheet_id = context.user_data.get('c1c5_sheet_id')
         
+        # Build CSV URLs
         main_csv_url = build_csv_url(MAIN_SPREADSHEET_ID, main_sheet_id)
         c1c5_csv_url = build_csv_url(C1_C5_SPREADSHEET_ID, c1c5_sheet_id)
         
         # Calculate column index
         target_column = date + 2
         
-        # Generate complete parade state (with C1, C5, and corrected names/ranks)
+        # Generate complete parade state (with leave info, C1, C5, and corrected names/ranks)
+        # Use same spreadsheet and sheet as main roster for leave tracking
         parade_state = process_full_parade_state(
             main_csv_url, 
             c1c5_csv_url, 
             GEMINI_API_KEY,
             MEDICS_REFERENCE_LIST,
-            target_column
+            target_column,
+            date,
+            CURRENT_MONTH,
+            MAIN_SPREADSHEET_ID,  # Same spreadsheet as main roster
+            int(main_sheet_id),   # Same sheet ID as main roster
+            GOOGLE_CREDENTIALS_JSON
         )
         
         # Send the result
         await processing_msg.edit_text(
-            f"✅ Parade state generated successfully!\n\n{parade_state}"
+            f"{parade_state}"
         )
         
         # Clear user data

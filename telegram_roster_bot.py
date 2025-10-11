@@ -223,6 +223,7 @@ def prepare_roster_data(df, target_date_col):
     roster_df = df.iloc[5:18, [1, target_date_col]].copy()
     roster_df.columns = ['Name', 'Duty']
     month = df.iloc[1, 1]
+    global CURRENT_MONTH
     CURRENT_MONTH = month
     return roster_df, month
 

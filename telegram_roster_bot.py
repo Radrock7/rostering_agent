@@ -27,7 +27,7 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MEDICS_REFERENCE_LIST = os.getenv("MEDICS_REFERENCE_LIST")  # Reference list of medics with full names and ranks
 
-CURRENT_MONTH = ''
+CURRENT_MONTH = 'OCT'
 # Conversation states
 SELECTING_DATE, SELECTING_MAIN_SHEET, SELECTING_C1C5_SHEET = range(3)
 
@@ -223,8 +223,6 @@ def prepare_roster_data(df, target_date_col):
     roster_df = df.iloc[5:18, [1, target_date_col]].copy()
     roster_df.columns = ['Name', 'Duty']
     month = df.iloc[1, 1]
-    global CURRENT_MONTH
-    CURRENT_MONTH = month
     return roster_df, month
 
 def update_roster_with_leave_info(roster_df, date, month, spreadsheet_id, sheet_id, credentials_json):

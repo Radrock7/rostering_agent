@@ -94,7 +94,7 @@ Roster (Name and Duty Assignment):
 
 **SPECIAL RULES:**
 1. CPC is external staff and should NOT be counted in holding strength, present strength, or medic strength
-2. If CPC has a duty (e.g., M2), list them as "M2: CPC" but don't count them in attendance
+2. If CPC has a duty (e.g., M2), another person will be assigned as M-2. In the parade state, list them as "M2: <M-2 Rank and Name>/ CPC". Do not count CPC in strength calculations.
 3. Anyone with NaN (no duty) should be listed under "Additional"
 4. Anyone with MA, DO, OIL, OFF, COURSE, MC, OSL should be listed under "Medics:" section with their absence reason
 5. Sort all names by military rank (highest to lowest): CPT > LTA > ME3 > ME2 > ME1 > 2SG > 3SG > CFC > CPL > LCP > PTE

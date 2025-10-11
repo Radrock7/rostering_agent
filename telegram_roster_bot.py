@@ -10,8 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from typing import Optional, Tuple, Dict, List
 import json
-from dotenv import load_dotenv
-load_dotenv()
+
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',

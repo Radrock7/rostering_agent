@@ -26,13 +26,13 @@ C1_C5_SPREADSHEET_ID = os.getenv("C1_C5_SPREADSHEET_ID")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MEDICS_REFERENCE_LIST = os.getenv("MEDICS_REFERENCE_LIST")  # Reference list of medics with full names and ranks
-CURRENT_MONTH = os.getenv("CURRENT_MONTH", "OCTOBER")  # Default to OCTOBER
 
+CURRENT_MONTH = ''
 # Conversation states
 SELECTING_DATE, SELECTING_MAIN_SHEET, SELECTING_C1C5_SHEET = range(3)
 
 class LeaveTracker:
-    """Track leave status from Google Sheets"""
+    """Track leave status from Google Sheets (optimized with single API call)"""
     
     def __init__(self, spreadsheet_id: str, sheet_id: int, credentials_json: str = None):
         """Initialize Leave Tracker with service account credentials and specific sheet ID
@@ -44,12 +44,23 @@ class LeaveTracker:
         """
         scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
         
-        if credentials_json:
-            # Load from JSON string (environment variable)
-            creds_json = json.loads(credentials_json)
-            creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
-        else:
+        if not credentials_json:
             raise ValueError("No credentials provided. Set GOOGLE_CREDENTIALS_JSON env var")
+        
+        try:
+            # Clean and parse JSON
+            credentials_json = credentials_json.strip()
+            logger.info(f"Parsing credentials JSON (length: {len(credentials_json)} chars)")
+            creds_json = json.loads(credentials_json)
+            logger.info("Successfully parsed credentials JSON")
+            creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse GOOGLE_CREDENTIALS_JSON: {e}")
+            logger.error(f"First 100 chars: {credentials_json[:100]}")
+            raise ValueError(f"Invalid JSON in GOOGLE_CREDENTIALS_JSON: {e}. Please check the format.")
+        except Exception as e:
+            logger.error(f"Failed to create credentials: {e}")
+            raise
         
         self.client = gspread.authorize(creds)
         spreadsheet = self.client.open_by_key(spreadsheet_id)
@@ -82,6 +93,13 @@ class LeaveTracker:
         else:
             self.merged_ranges = []
             logger.warning(f"No merged ranges found for sheet ID {sheet_id}")
+        
+        # PERFORMANCE OPTIMIZATION: Load all data in one API call
+        # Get all values from rows 6-17 (all columns)
+        range_notation = f'A{self.START_ROW}:Z{self.END_ROW}'
+        logger.info(f"Loading all data from range: {range_notation}")
+        self.all_data = self.sheet.get(range_notation)
+        logger.info(f"Loaded {len(self.all_data)} rows of data")
     
     def _is_leave_cell(self, cell_value: str) -> bool:
         """Check if cell contains any leave type"""
@@ -90,10 +108,21 @@ class LeaveTracker:
         cell_upper = cell_value.upper()
         return any(leave_type in cell_upper for leave_type in self.LEAVE_TYPES)
     
+    def _get_cell_value(self, row: int, col: int) -> str:
+        """Get cell value from loaded data (fast, no API call)"""
+        # Convert to 0-based index for the data array
+        row_idx = row - self.START_ROW
+        col_idx = col - 1
+        
+        if 0 <= row_idx < len(self.all_data):
+            if 0 <= col_idx < len(self.all_data[row_idx]):
+                return self.all_data[row_idx][col_idx]
+        return ""
+    
     def _find_person_row(self, name: str) -> Optional[int]:
-        """Find the row number for a person by name"""
+        """Find the row number for a person by name (uses loaded data, no API call)"""
         for row in range(self.START_ROW, self.END_ROW + 1):
-            cell_value = self.sheet.cell(row, self.NAME_COLUMN).value
+            cell_value = self._get_cell_value(row, self.NAME_COLUMN)
             if cell_value and cell_value.strip() == name.strip():
                 return row
         return None
@@ -124,7 +153,8 @@ class LeaveTracker:
                 
                 # Check if the queried day falls within this range
                 if start_day <= day <= end_day:
-                    cell_value = self.sheet.cell(row_idx, start_col).value or ""
+                    # Use cached data to get cell value
+                    cell_value = self._get_cell_value(row_idx, start_col)
                     
                     if self._is_leave_cell(cell_value):
                         return (cell_value.strip(), start_day, end_day)
@@ -192,7 +222,9 @@ def prepare_roster_data(df, target_date_col):
     """Extract relevant roster data for the target date."""
     roster_df = df.iloc[5:18, [1, target_date_col]].copy()
     roster_df.columns = ['Name', 'Duty']
-    return roster_df
+    month = df.iloc[1, 1]
+    CURRENT_MONTH = month
+    return roster_df, month
 
 def update_roster_with_leave_info(roster_df, date, month, spreadsheet_id, sheet_id, credentials_json):
     """
@@ -210,6 +242,11 @@ def update_roster_with_leave_info(roster_df, date, month, spreadsheet_id, sheet_
         Updated DataFrame with leave information
     """
     try:
+        # Check if credentials are provided
+        if not credentials_json:
+            logger.warning("GOOGLE_CREDENTIALS_JSON not set. Skipping leave tracking.")
+            return roster_df
+        
         # Find people with NaN duty (no specific assignment)
         names_to_check = roster_df[roster_df['Duty'].isna()]['Name'].tolist()
         
@@ -244,12 +281,19 @@ def update_roster_with_leave_info(roster_df, date, month, spreadsheet_id, sheet_
         
         return roster_df
         
+    except ValueError as e:
+        # Specific error for JSON/credentials issues
+        logger.error(f"Credentials error: {e}")
+        logger.error("Please check GOOGLE_CREDENTIALS_JSON environment variable formatting")
+        logger.error("See GOOGLE_CREDENTIALS_JSON Troubleshooting Guide for help")
+        logger.warning("Continuing without leave information")
+        return roster_df
     except Exception as e:
         logger.error(f"Error checking leave status: {e}")
         logger.warning("Continuing without leave information")
         return roster_df
 
-def generate_parade_state_with_gemini(api_key, roster_df, date, day):
+def generate_parade_state_with_gemini(api_key, roster_df, date, day, month):
     """Use Gemini API to generate parade state message."""
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.5-flash', generation_config=genai.GenerationConfig(
@@ -259,7 +303,7 @@ def generate_parade_state_with_gemini(api_key, roster_df, date, day):
     prompt = f"""You are a military administrative assistant helping to generate a daily parade state message for a medical unit.
 
 **INPUT DATA:**
-Date: {date} OCTOBER 2025
+Date: {date} {month} 2025
 Day: {day}
 
 Roster (Name and Duty Assignment):
@@ -298,25 +342,27 @@ Roster (Name and Duty Assignment):
 **OUTPUT FORMAT:**
 Generate EXACTLY this format:
 
-PARADE STATE FOR {date} OCTOBER 2025 {day}
+PARADE STATE FOR {date} {month} 2025 {day}
 
 Holding Strength: 17
 Present Strength: [calculate]/[holding strength]
 Medic Strength: [calculate]/12
 
 MO: 
-CPT (DR) CHONG YUAN KAI:
-CPT (DR) ANDRE WONG JUN HUI: 
+CPT (DR) CHONG:
+CPT (DR) ANDRE: 
 
 
 SM:
-ME3 KARRIE YAP:
-ME2 BRYAN LIM:
+ME3 KARRIE:
+ME2 BRYAN:
 
 
 Medics: 
 [List absent personnel with reasons, sorted by rank]
 [Format: RANK NAME: REASON]
+[If reason includes duration, show full format: RANK NAME: LEAVE_TYPE (START_DATE - END_DATE)]
+
 
 M1: [Name(s) of M1 duty medic]
 M2: [Name(s) of M2 duty medic]
@@ -333,11 +379,8 @@ Additional:
 
 
 BASE E (CPC): TBC
-DAY: PAO TBC (SBAB), PAO TBC (CPC)
-NIGHT: PAO TBC (SBAB), PAO TBC (CPC)
-
 SUPPLY ASSISTANT
-CFC HOVAN TAN: 
+CFC HOVAN: 
 
 Flying Hours: TBC
 
@@ -345,6 +388,7 @@ Flying Hours: TBC
 - Leave MO, SM, C1, C5, BASE E, SUPPLY ASSISTANT, and Flying Hours sections exactly as shown
 - Only update the Medics, M1-M4, and Additional sections based on the roster data
 - Ensure all names are sorted by rank within each section
+- Preserve leave duration information in the format shown in the roster
 - Do not add any extra commentary or explanation, just output the parade state message
 """
     
@@ -401,7 +445,6 @@ def correct_medic_names_ranks(api_key, parade_state, reference_list):
 5. Do NOT modify any other sections (MO, SM, C1, C5, BASE E, SUPPLY ASSISTANT, Flying Hours)
 6. Only correct medic-related entries
 
-**PARADE STATE MESSAGE:**
 {parade_state}
 
 Output the corrected parade state message with accurate medic names and ranks. Do not add any extra commentary or explanation.
@@ -410,19 +453,19 @@ Output the corrected parade state message with accurate medic names and ranks. D
     response = model.generate_content(prompt)
     return response.text
 
-def process_full_parade_state(main_csv_url, c1_c5_csv_url, api_key, reference_list, target_date_col, date, month, spreadsheet_id, sheet_id, credentials_json):
+def process_full_parade_state(main_csv_url, c1_c5_csv_url, api_key, reference_list, target_date_col, date, spreadsheet_id, sheet_id, credentials_json):
     """Generate complete parade state with leave info, C1, C5, and corrected medic names/ranks."""
     # Step 1: Fetch main roster and prepare initial data
     csv_data = fetch_csv_from_url(main_csv_url)
     df = pd.read_csv(csv_data, header=None)
     date_num, day = extract_date_info(df, target_date_col)
-    roster_df = prepare_roster_data(df, target_date_col)
+    roster_df, month = prepare_roster_data(df, target_date_col)
     
     # Step 2: Update roster with leave information (using same spreadsheet and selected sheet)
     roster_df = update_roster_with_leave_info(roster_df, date, month, spreadsheet_id, sheet_id, credentials_json)
     
     # Step 3: Generate initial parade state with updated roster
-    initial_parade_state = generate_parade_state_with_gemini(api_key, roster_df, date_num, day)
+    initial_parade_state = generate_parade_state_with_gemini(api_key, roster_df, date_num, day, month)
     
     # Step 4: Fetch C1/C5 data and fill in C1 and C5
     csv_data = fetch_csv_from_url(c1_c5_csv_url)
@@ -591,7 +634,6 @@ async def handle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
             MEDICS_REFERENCE_LIST,
             target_column,
             date,
-            CURRENT_MONTH,
             MAIN_SPREADSHEET_ID,  # Same spreadsheet as main roster
             int(main_sheet_id),   # Same sheet ID as main roster
             GOOGLE_CREDENTIALS_JSON

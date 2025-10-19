@@ -27,7 +27,6 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MEDICS_REFERENCE_LIST = os.getenv("MEDICS_REFERENCE_LIST")  # Reference list of medics with full names and ranks
 
-CURRENT_MONTH = 'OCT'
 # Conversation states
 SELECTING_DATE, SELECTING_MAIN_SHEET, SELECTING_C1C5_SHEET = range(3)
 
@@ -348,13 +347,13 @@ Present Strength: [calculate]/[holding strength]
 Medic Strength: [calculate]/12
 
 MO: 
-CPT (DR) CHONG:
-CPT (DR) ANDRE: 
+CPT (DR) CHONG YUAN KAI:
+CPT (DR) ANDRE WONG JUN HUI: 
 
 
 SM:
-ME3 KARRIE:
-ME2 BRYAN:
+ME3 KARRIE YAP:
+ME2 BRYAN LIM:
 
 
 Medics: 
@@ -379,7 +378,7 @@ Additional:
 
 BASE E (CPC): TBC
 SUPPLY ASSISTANT
-CFC HOVAN: 
+CFC HOVAN TAN: 
 
 Flying Hours: TBC
 
@@ -608,7 +607,7 @@ async def handle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Send processing message
         processing_msg = await update.message.reply_text(
-            f"⏳ Generating parade state for {CURRENT_MONTH} {date}...\n"
+            f"⏳ Generating parade state for the {date} of this month...\n"
             "Checking leave status and processing roster...\n"
             "Please wait a moment."
         )

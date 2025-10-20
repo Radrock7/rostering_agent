@@ -377,6 +377,8 @@ Additional:
 
 
 BASE E (CPC): TBC
+DAY: PAO XXX (SBAB), PAO YYY (CPC)
+NIGHT: PAO ZZZ (SBAB), PAO AAA (CPC)
 SUPPLY ASSISTANT
 CFC HOVAN TAN: 
 
@@ -607,7 +609,7 @@ async def handle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Send processing message
         processing_msg = await update.message.reply_text(
-            f"⏳ Generating parade state for the {date} of this month...\n"
+            f"⏳ Generating parade state for the {date} of selected month...\n"
             "Checking leave status and processing roster...\n"
             "Please wait a moment."
         )

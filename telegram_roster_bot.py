@@ -184,6 +184,31 @@ class LeaveTracker:
         
         return results
 
+
+async def get_pinned_pao_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+    """Retrieve the pinned PAO message from the chat.
+    
+    Returns:
+        The text content of the pinned message, or None if no pinned message found
+    """
+    try:
+        chat_id = update.effective_chat.id
+        
+        # Get pinned message
+        pinned_message = await context.bot.get_chat(chat_id)
+        
+        if pinned_message.pinned_message:
+            pao_text = pinned_message.pinned_message.text
+            logger.info(f"Retrieved pinned PAO message ({len(pao_text)} chars)")
+            return pao_text
+        else:
+            logger.warning("No pinned message found in chat")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error retrieving pinned message: {e}")
+        return None
+
 def get_sheet_names(spreadsheet_id, api_key):
     """Fetch all sheet names and IDs from a Google Spreadsheet."""
     url = f'https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}?key={api_key}'
@@ -377,8 +402,6 @@ Additional:
 
 
 BASE E (CPC): TBC
-DAY: PAO XXX (SBAB), PAO YYY (CPC)
-NIGHT: PAO ZZZ (SBAB), PAO AAA (CPC)
 SUPPLY ASSISTANT
 CFC HOVAN TAN: 
 
@@ -423,6 +446,35 @@ Fill in the C1 and C5 personnel rank and name in the parade state message below.
     response = model.generate_content(prompt)
     return response.text
 
+def fill_pao_info(api_key,parade_state, pao_message, date, day, month):
+    """Fill in the PAO information in the parade state."""
+    if pao_message:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.5-flash', generation_config=genai.GenerationConfig(
+            temperature=0,
+        ))
+        prompt = f"""You are an administrative assistant in charge of formatting the PAO information for a military parade state message. **PAO (PRIVATE AMBULANCE OPERATOR) INFORMATION:**
+The following is the weekly PAO tasking message. Extract the TO name and PAO assignments for {date} {month} 2025 ({day}):
+
+{pao_message}
+
+From this message, identify:
+1. The TO (Transport Officer) name for BASE E on {date} {month}
+2. The PAO assignments for DAY shift on {date} {month}
+3. The PAO assignments for NIGHT shift on {date} {month}
+
+Fill these into the BASE E section of the parade state in this format:
+BASE E (CPC): <TO Rank & Name>
+DAY: PAO <Name> (SBAB), PAO <Name> (CPC)
+NIGHT: PAO <Name> (SBAB), PAO <Name> (CPC)
+
+Output the completed BASE E section with the PAO information filled in. Do not add any extra commentary or explanation.
+
+"""
+        response = model.generate_content(prompt)
+        parade_state = parade_state.replace("BASE E (CPC): TBC", response.text)
+    return parade_state
+
 def correct_medic_names_ranks(api_key, parade_state, reference_list):
     """Use Gemini API to correct medic names and ranks in parade state."""
     genai.configure(api_key=api_key)
@@ -453,7 +505,7 @@ Output the corrected parade state message with accurate medic names and ranks. D
     response = model.generate_content(prompt)
     return response.text
 
-def process_full_parade_state(main_csv_url, c1_c5_csv_url, api_key, reference_list, target_date_col, date, spreadsheet_id, sheet_id, credentials_json):
+def process_full_parade_state(main_csv_url, c1_c5_csv_url, api_key, reference_list, target_date_col, date, spreadsheet_id, sheet_id, credentials_json, pao_message):
     """Generate complete parade state with leave info, C1, C5, and corrected medic names/ranks."""
     # Step 1: Fetch main roster and prepare initial data
     csv_data = fetch_csv_from_url(main_csv_url)
@@ -473,9 +525,12 @@ def process_full_parade_state(main_csv_url, c1_c5_csv_url, api_key, reference_li
     c1_c5_df = prepare_c1_c5_data(df, target_date_col)
     parade_state_with_c1_c5 = fill_c1_c5_with_gemini(api_key, initial_parade_state, c1_c5_df)
     
-    # Step 5: Correct medic names and ranks using reference list
-    final_parade_state = correct_medic_names_ranks(api_key, parade_state_with_c1_c5, reference_list)
-    
+    # Step 5: Add PAO information from pinned message (if available)
+    parade_state_with_pao = fill_pao_info(api_key, parade_state_with_c1_c5, pao_message, date, day, month)
+
+    # Step 6: Correct medic names and ranks using reference list
+    final_parade_state = correct_medic_names_ranks(api_key, parade_state_with_pao, reference_list)
+
     return final_parade_state
 
 # Telegram Bot Handlers
@@ -624,6 +679,13 @@ async def handle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Calculate column index
         target_column = date + 2
+
+        pao_message = await get_pinned_pao_message(update, context)
+        if pao_message:
+            logger.info("Using pinned PAO message for parade state")
+        else:
+            logger.warning("No PAO message found - BASE E section will show TBC")
+        
         
         # Generate complete parade state (with leave info, C1, C5, and corrected names/ranks)
         # Use same spreadsheet and sheet as main roster for leave tracking
@@ -636,7 +698,8 @@ async def handle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
             date,
             MAIN_SPREADSHEET_ID,  # Same spreadsheet as main roster
             int(main_sheet_id),   # Same sheet ID as main roster
-            GOOGLE_CREDENTIALS_JSON
+            GOOGLE_CREDENTIALS_JSON,
+            pao_message
         )
         
         # Send the result

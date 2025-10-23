@@ -191,23 +191,137 @@ async def get_pinned_pao_message(update: Update, context: ContextTypes.DEFAULT_T
     Returns:
         The text content of the pinned message, or None if no pinned message found
     """
+    user_id = update.effective_user.id
+    saved_pao = context.user_data.get(f'pao_message_{user_id}')
+    
+    if saved_pao:
+        logger.info(f"Retrieved saved PAO message ({len(saved_pao)} chars)")
+        return saved_pao
+    else:
+        logger.warning("No saved PAO message found. Use /setpao to save one.")
+        return None
+
+
+async def get_pinned_pao_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+    """Retrieve the pinned PAO message from the chat.
+    
+    For group chats: Reads pinned message
+    For private chats: Reads saved PAO message (set via /setpao)
+    
+    Returns:
+        The text content of the PAO message, or None if not found
+    """
     try:
-        chat_id = update.effective_chat.id
+        chat = update.effective_chat
+        chat_id = chat.id
+        chat_type = chat.type
         
-        # Get pinned message
-        pinned_message = await context.bot.get_chat(chat_id)
+        logger.info(f"Attempting to retrieve PAO message from {chat_type} chat (ID: {chat_id})")
         
-        if pinned_message.pinned_message:
-            pao_text = pinned_message.pinned_message.text
-            logger.info(f"Retrieved pinned PAO message ({len(pao_text)} chars)")
-            return pao_text
+        # For private chats, check if user has saved a PAO message
+        if chat_type == "private":
+            user_id = update.effective_user.id
+            saved_pao = context.user_data.get(f'pao_message_{user_id}')
+            
+            if saved_pao:
+                logger.info(f"Retrieved saved PAO message ({len(saved_pao)} chars)")
+                return saved_pao
+            else:
+                logger.warning("No saved PAO message found. Use /setpao to save one.")
+                return None
+        
+        # For groups/supergroups, get pinned message
+        chat_info = await context.bot.get_chat(chat_id)
+        
+        if hasattr(chat_info, 'pinned_message') and chat_info.pinned_message:
+            pao_text = chat_info.pinned_message.text
+            if pao_text:
+                logger.info(f"Retrieved pinned PAO message ({len(pao_text)} chars)")
+                return pao_text
+            else:
+                logger.warning("Pinned message exists but has no text content")
+                return None
         else:
             logger.warning("No pinned message found in chat")
             return None
             
     except Exception as e:
-        logger.error(f"Error retrieving pinned message: {e}")
+        logger.error(f"Error retrieving PAO message: {e}")
         return None
+
+async def set_pao_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save a PAO message by replying to it with /setpao (for private chats)."""
+    try:
+        # Check if this is a reply to a message
+        if not update.message.reply_to_message:
+            await update.message.reply_text(
+                "❌ Please reply to the PAO message with /setpao to save it.\n\n"
+                "Example:\n"
+                "1. Find your weekly PAO tasking message\n"
+                "2. Reply to it with: /setpao\n"
+                "3. The message will be saved for parade state generation"
+            )
+            return
+        
+        # Get the replied-to message text
+        pao_text = update.message.reply_to_message.text
+        
+        if not pao_text:
+            await update.message.reply_text(
+                "❌ The message you replied to has no text content.\n"
+                "Please reply to a text message containing the PAO tasking."
+            )
+            return
+        
+        # Save the PAO message
+        user_id = update.effective_user.id
+        context.user_data[f'pao_message_{user_id}'] = pao_text
+        
+        # Count lines for feedback
+        line_count = len(pao_text.split('\n'))
+        
+        await update.message.reply_text(
+            f"✅ PAO message saved successfully!\n\n"
+            f"📝 Message length: {len(pao_text)} characters\n"
+            f"📄 Lines: {line_count}\n\n"
+            f"This message will be used for all parade state generations until you update it.\n\n"
+            f"💡 Tip: Update this message weekly using /setpao on the new PAO tasking."
+        )
+        
+        logger.info(f"User {user_id} saved PAO message ({len(pao_text)} chars)")
+        
+    except Exception as e:
+        logger.error(f"Error in set_pao_command: {e}")
+        await update.message.reply_text(
+            "❌ An error occurred while saving the PAO message.\n"
+            "Please try again or contact the administrator."
+        )
+
+async def clear_pao_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear the saved PAO message (for private chats)."""
+    try:
+        user_id = update.effective_user.id
+        pao_key = f'pao_message_{user_id}'
+        
+        if pao_key in context.user_data:
+            del context.user_data[pao_key]
+            await update.message.reply_text(
+                "✅ Saved PAO message cleared.\n\n"
+                "Use /setpao to save a new PAO message."
+            )
+            logger.info(f"User {user_id} cleared PAO message")
+        else:
+            await update.message.reply_text(
+                "ℹ️ No saved PAO message found.\n\n"
+                "Use /setpao (by replying to a message) to save a PAO message."
+            )
+    except Exception as e:
+        logger.error(f"Error in clear_pao_command: {e}")
+        await update.message.reply_text(
+            "❌ An error occurred while clearing the PAO message."
+        )
+
+
 
 def get_sheet_names(spreadsheet_id, api_key):
     """Fetch all sheet names and IDs from a Google Spreadsheet."""
@@ -756,6 +870,8 @@ def main():
     # Register handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("setpao", set_pao_command))
+    application.add_handler(CommandHandler("clearpao", clear_pao_command))
     application.add_handler(conv_handler)
     
     # Register error handler

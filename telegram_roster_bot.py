@@ -458,6 +458,7 @@ Roster (Name and Duty Assignment):
 - LL: Leave of any kind
 - COMPASSIONATE LEAVE: Compassionate leave
 - NaN: No specific duty (Additional personnel)
+- If there is an X, just treat person as additional
 - CPC: External staff (not counted in attendance)
 - Leave entries with duration format: LEAVE_TYPE (START_DATE - END_DATE) should be listed with the duration included
 
@@ -481,7 +482,7 @@ Generate EXACTLY this format:
 
 PARADE STATE FOR {date} {month} 2025 {day}
 
-Holding Strength: 17
+Holding Strength: 16
 Present Strength: [calculate]/[holding strength]
 Medic Strength: [calculate]/12
 
@@ -491,7 +492,6 @@ CPT (DR) ANDRE WONG JUN HUI:
 
 
 SM:
-ME3 KARRIE YAP:
 ME2 BRYAN LIM:
 
 

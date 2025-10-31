@@ -603,11 +603,11 @@ def correct_medic_names_ranks(api_key, parade_state, reference_list):
 
 **YOUR TASK:**
 1. Review the "Medics:" section, "M1-M4" sections, C1/C5, "Additional:" and "BASE E (CPC)" sections in the parade state below
-2. Match the names in the parade state with the reference list above
+2. Only correct the rank and names of the medics mentioned in the parade state based on the reference list
 3. Correct any discrepancies in:
-   - Rank (ensure it matches the reference list)
-   - Name (ensure full names are used as per reference list)
-4. Preserve the exact format and structure of the parade state
+   - Rank 
+   - Name
+4. Preserve the exact format and structure of the parade state (Only edit rank and names do not add anything else)
 5. Do NOT modify any other sections (MO, SM, SUPPLY ASSISTANT, Flying Hours)
 
 {parade_state}
